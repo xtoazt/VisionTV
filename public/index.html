@@ -3,70 +3,169 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Livestream</title>
+    <title>Livestream with Chat</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #111;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #videoContainer {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 80%;
+            max-width: 800px;
+        }
+        #broadcasterVideo, #viewerVideo {
+            width: 100%;
+            border: 2px solid white;
+            border-radius: 10px;
+        }
+        #chatContainer {
+            margin-top: 10px;
+            display: flex;
+            flex-direction: column;
+            width: 80%;
+            max-width: 800px;
+            border: 2px solid white;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            overflow: hidden;
+        }
+        #chat {
+            flex: 1;
+            padding: 10px;
+            overflow-y: auto;
+            max-height: 200px;
+        }
+        #chat input {
+            width: 100%;
+            padding: 10px;
+            border: none;
+            border-top: 2px solid white;
+            outline: none;
+        }
+        #chat input::placeholder {
+            color: #888;
+        }
+    </style>
 </head>
 <body>
-    <div>
-        <h2>Choose a Channel</h2>
-        <button onclick="joinChannel(1)">Channel 1</button>
-        <button onclick="joinChannel(2)">Channel 2</button>
+    <div id="videoContainer">
+        <video id="broadcasterVideo" autoplay playsinline muted></video>
+        <video id="viewerVideo" autoplay playsinline></video>
     </div>
-    <div id="stream" style="display:none;">
-        <h2>Live Stream</h2>
-        <video id="video" autoplay playsinline></video>
-        <textarea id="chatInput" placeholder="Type your message"></textarea>
-        <button onclick="sendMessage()">Send</button>
+
+    <div id="chatContainer">
         <div id="chat"></div>
+        <input type="text" id="chatInput" placeholder="Type a message...">
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/simple-peer/simplepeer.min.js"></script>
     <script>
         const socket = io();
-        let currentChannel = null;
-        let peer = null;
+        const broadcasterVideo = document.getElementById('broadcasterVideo');
+        const viewerVideo = document.getElementById('viewerVideo');
+        const chat = document.getElementById('chat');
+        const chatInput = document.getElementById('chatInput');
 
-        function joinChannel(channel) {
-            socket.emit('joinChannel', channel, (response) => {
-                if (response.success) {
-                    currentChannel = channel;
-                    document.getElementById('stream').style.display = 'block';
-                    startStream();
-                } else {
-                    alert(response.error);
-                }
-            });
-        }
+        let isBroadcaster = false;
 
-        function startStream() {
-            navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-                .then((stream) => {
-                    const video = document.getElementById('video');
-                    video.srcObject = stream;
+        // Join a channel
+        socket.emit('joinChannel', (data) => {
+            isBroadcaster = data.role === 'broadcaster';
 
-                    peer = new SimplePeer({ initiator: true, stream });
-                    peer.on('signal', (data) => {
-                        socket.emit('signal', { to: currentChannel, signal: data });
-                    });
-
-                    socket.on('signal', (data) => {
-                        peer.signal(data.signal);
-                    });
-                })
-                .catch((err) => console.error(err));
-        }
-
-        function sendMessage() {
-            const message = document.getElementById('chatInput').value;
-            socket.emit('chatMessage', { channel: currentChannel, message });
-        }
-
-        socket.on(`chat-${currentChannel}`, (data) => {
-            const chat = document.getElementById('chat');
-            const message = document.createElement('div');
-            message.textContent = `${data.user}: ${data.message}`;
-            chat.appendChild(message);
+            if (isBroadcaster) {
+                startBroadcasting();
+            } else {
+                startViewing(data.broadcaster);
+            }
         });
+
+        // Handle chat history and user name
+        socket.on('chatHistory', (data) => {
+            const { chatMessages, userName } = data;
+
+            // Display chat history
+            chatMessages.forEach((entry) => {
+                const message = document.createElement('div');
+                message.textContent = `${entry.user}: ${entry.message}`;
+                chat.appendChild(message);
+            });
+
+            chat.scrollTop = chat.scrollHeight;
+            console.log(`You are ${userName}`);
+        });
+
+        // Handle new chat messages
+        socket.on('chat', (data) => {
+            const { user, message } = data;
+            const chatMessage = document.createElement('div');
+            chatMessage.textContent = `${user}: ${message}`;
+            chat.appendChild(chatMessage);
+            chat.scrollTop = chat.scrollHeight;
+        });
+
+        // Send chat messages
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && chatInput.value.trim()) {
+                socket.emit('chatMessage', chatInput.value.trim());
+                chatInput.value = '';
+            }
+        });
+
+        // Handle WebRTC signaling
+        socket.on('signal', async ({ from, signal }) => {
+            if (isBroadcaster) {
+                const peer = new RTCPeerConnection();
+                const offer = await peer.createOffer();
+                await peer.setLocalDescription(offer);
+                socket.emit('signal', { to: from, signal: peer.localDescription });
+            } else {
+                const peer = new RTCPeerConnection();
+                peer.ontrack = (event) => {
+                    viewerVideo.srcObject = event.streams[0];
+                };
+                await peer.setRemoteDescription(signal);
+                const answer = await peer.createAnswer();
+                await peer.setLocalDescription(answer);
+                socket.emit('signal', { to: from, signal: peer.localDescription });
+            }
+        });
+
+        // Start broadcasting
+        async function startBroadcasting() {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            broadcasterVideo.srcObject = stream;
+
+            const peer = new RTCPeerConnection();
+            stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+            peer.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('signal', { to: null, signal: event.candidate });
+                }
+            };
+
+            const offer = await peer.createOffer();
+            await peer.setLocalDescription(offer);
+            socket.emit('signal', { to: null, signal: peer.localDescription });
+        }
+
+        // Start viewing
+        async function startViewing(broadcasterId) {
+            viewerVideo.style.display = 'block';
+            broadcasterVideo.style.display = 'none';
+            socket.emit('signal', { to: broadcasterId, signal: null });
+        }
     </script>
 </body>
 </html>

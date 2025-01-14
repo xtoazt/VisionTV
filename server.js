@@ -1,56 +1,68 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
+const socketIO = require('socket.io');
 
+// Initialize Express app and HTTP server
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = socketIO(server);
 
-let channels = { 1: null, 2: null };
+// Serve static files from the "public" directory
+app.use(express.static('public'));
+
+// Channel and users state
+let channel = null; // Holds the broadcaster's socket ID
+let chatMessages = []; // Stores chat history for the session
+let userCount = 0; // Tracks the number of users for naming purposes
+let users = {}; // Maps socket IDs to user names
 
 io.on('connection', (socket) => {
-    console.log('A user connected:', socket.id);
+    userCount++;
+    const userName = `User ${userCount}`;
+    users[socket.id] = userName;
+    console.log(`${userName} connected:`, socket.id);
 
-    // Handle joining a channel
-    socket.on('joinChannel', (channel, callback) => {
-        if (!channels[channel]) {
-            channels[channel] = socket.id;
-            callback({ success: true });
+    // Send chat history and user name to the newly connected user
+    socket.emit('chatHistory', { chatMessages, userName });
+
+    // Handle channel join request
+    socket.on('joinChannel', (callback) => {
+        if (!channel) {
+            channel = socket.id; // Assign the channel to this user
+            callback({ success: true, role: 'broadcaster' });
         } else {
-            callback({ success: false, error: 'Channel is occupied.' });
+            callback({ success: true, role: 'viewer', broadcaster: channel });
         }
     });
 
-    // Handle leaving a channel
-    socket.on('leaveChannel', (channel) => {
-        if (channels[channel] === socket.id) {
-            channels[channel] = null;
-        }
-    });
-
-    // Handle signaling data
+    // Handle signaling data for WebRTC
     socket.on('signal', (data) => {
         const { to, signal } = data;
         io.to(to).emit('signal', { from: socket.id, signal });
     });
 
     // Handle chat messages
-    socket.on('chatMessage', (data) => {
-        const { channel, message } = data;
-        io.emit(`chat-${channel}`, { user: socket.id, message });
+    socket.on('chatMessage', (message) => {
+        const chatEntry = { user: users[socket.id], message };
+        chatMessages.push(chatEntry); // Save message to session history
+        io.emit('chat', chatEntry); // Broadcast the chat message to all users
     });
 
+    // Cleanup when a user disconnects
     socket.on('disconnect', () => {
-        Object.keys(channels).forEach((channel) => {
-            if (channels[channel] === socket.id) {
-                channels[channel] = null;
-            }
-        });
-        console.log('A user disconnected:', socket.id);
+        console.log(`${users[socket.id]} disconnected:`, socket.id);
+
+        if (channel === socket.id) {
+            channel = null; // Clear the channel if the broadcaster disconnects
+            console.log('Broadcaster left. Channel is now free.');
+        }
+
+        delete users[socket.id]; // Remove user from the list
     });
 });
 
-app.use(express.static('public'));
-server.listen(3000, () => {
-    console.log('Server listening on port 3000');
+// Start the server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
 });
