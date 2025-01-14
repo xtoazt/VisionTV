@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Livestream</title>
+</head>
+<body>
+    <div>
+        <h2>Choose a Channel</h2>
+        <button onclick="joinChannel(1)">Channel 1</button>
+        <button onclick="joinChannel(2)">Channel 2</button>
+    </div>
+    <div id="stream" style="display:none;">
+        <h2>Live Stream</h2>
+        <video id="video" autoplay playsinline></video>
+        <textarea id="chatInput" placeholder="Type your message"></textarea>
+        <button onclick="sendMessage()">Send</button>
+        <div id="chat"></div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/simple-peer/simplepeer.min.js"></script>
+    <script>
+        const socket = io();
+        let currentChannel = null;
+        let peer = null;
+
+        function joinChannel(channel) {
+            socket.emit('joinChannel', channel, (response) => {
+                if (response.success) {
+                    currentChannel = channel;
+                    document.getElementById('stream').style.display = 'block';
+                    startStream();
+                } else {
+                    alert(response.error);
+                }
+            });
+        }
+
+        function startStream() {
+            navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+                .then((stream) => {
+                    const video = document.getElementById('video');
+                    video.srcObject = stream;
+
+                    peer = new SimplePeer({ initiator: true, stream });
+                    peer.on('signal', (data) => {
+                        socket.emit('signal', { to: currentChannel, signal: data });
+                    });
+
+                    socket.on('signal', (data) => {
+                        peer.signal(data.signal);
+                    });
+                })
+                .catch((err) => console.error(err));
+        }
+
+        function sendMessage() {
+            const message = document.getElementById('chatInput').value;
+            socket.emit('chatMessage', { channel: currentChannel, message });
+        }
+
+        socket.on(`chat-${currentChannel}`, (data) => {
+            const chat = document.getElementById('chat');
+            const message = document.createElement('div');
+            message.textContent = `${data.user}: ${data.message}`;
+            chat.appendChild(message);
+        });
+    </script>
+</body>
+</html>
